@@ -8,9 +8,9 @@
   
 */
 
-#define VERSION "0.0.1" 
-#define VERDATE "2015-03-31"
-#define PROGMONIKER "MDV"
+#define VERSION "0.1.0" 
+#define VERDATE "2015-04-01"
+#define PROGMONIKER "MSD"
 
 // SCAN_DELAY_ms is the interval at which we scan the controls for changes
 #define SCAN_DELAY_ms 50
@@ -88,7 +88,7 @@ void loop () {
                   | ( abs ( joystickUD - oldJoystickUD ) > joystickJitterTolerance )
                 );
   
-  if ( ( ( millis() - lastMessageAt_ms ) >= 1000UL ) || changed ) {
+  if ( ( ( millis() - lastMessageAt_ms ) >= 500UL ) || changed ) {
     
     // assemble the message before sending so it can be sent all at once
     
@@ -100,10 +100,18 @@ void loop () {
     strBuf [ 3 ] = ( joystickLR >> 8 ) & 0x00ff;
     strBuf [ 4 ] = ( joystickUD >> 0 ) & 0x00ff;
     strBuf [ 5 ] = ( joystickUD >> 8 ) & 0x00ff;
-    strBuf [ 6 ] = ( checksum  >> 0 ) & 0x00ff;
-    strBuf [ 7 ] = ( checksum  >> 8 ) & 0x00ff;
+    strBuf [ 6 ] = ( bits       >> 0 ) & 0x00ff;
+    strBuf [ 7 ] = ( bits       >> 8 ) & 0x00ff;
+    strBuf [ 8 ] = ( checksum   >> 0 ) & 0x00ff;
+    strBuf [ 9 ] = ( checksum   >> 8 ) & 0x00ff;
     
-    Serial.write ( ( uint8_t * ) strBuf, 8 );
+    if ( 1 ) {
+      Serial.println();
+      Serial.print ( "LR: " ); Serial.print ( joystickLR );
+      Serial.print ( "UD: " ); Serial.print ( joystickUD );
+      Serial.print ( "bits: " ); Serial.print ( bits );
+    }
+    Serial.write ( ( uint8_t * ) strBuf, 10 );
     
     lastMessageAt_ms = millis();
     

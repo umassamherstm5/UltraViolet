@@ -7,18 +7,26 @@
   via XBee radio. Uses this data to command motor speeds and platform
   pneumatics valve.
   
+  Last change was to convert commanded speeds to percent 
+    [-100.0, 100.0] from [-1.0, 1.0].
+  Once operation is satisfactory, try decreasing verbosity.
+  
+  Updated verbosity code, separated motor verbosity out
+  Removed delay of 50ms from loop, replaced with timeout
+  
 */
 
-#define VERSION "0.4.1" 
-#define VERDATE "2015-03-31"
+#define VERSION "0.6.0" 
+#define VERDATE "2015-04-02"
 #define PROGMONIKER "SLD"
 
-#include <Adafruit_NeoPixel.h>
 #include <math.h>
+#include <Adafruit_NeoPixel.h>
 
-#define BAUDRATE 115200
+#define BAUDRATE 19200
 #define SLD_VERBOSE 8
 #define COMMUNICATIONS_TIMEOUT_ms 2000
+#define STICK_DEADBAND_cts 10
 
 // Pins
 #define pd_MOTOR_ENABLE 4
@@ -78,9 +86,11 @@ Adafruit_NeoPixel neoPixelStrip = Adafruit_NeoPixel(nPixels, pd_NeoPixel_Control
 
 class Motor {
   public:
+  
     Motor () {
       reset ();
     }
+    
     Motor ( int motor_ID, int pp_FWD, int pp_REV ) {
       _motor_ID = motor_ID;
       _pp_FWD = pp_FWD;
@@ -112,7 +122,7 @@ class Motor {
     
     void tick () {
     
-      #if SLD_VERBOSE > 5
+      #if _MOTOR_VERBOSE >= 4
         // hack!
         for ( int i = 0; i < ( _motor_ID == 100 ? 0 : 40 ); i++ ) {
           Serial.print ( " " );
@@ -128,7 +138,7 @@ class Motor {
       
       if (    ( fabs ( _cmd_speed_pct - _curr_speed_pct ) < 1e-3 )
            && ( _cmd_direction == _curr_direction ) ) {
-        #if SLD_VERBOSE >= 12
+        #if _MOTOR_VERBOSE >= 12
           Serial.print ( "Tick: we're good\n" );
         #endif
         return;
@@ -136,7 +146,7 @@ class Motor {
     
       float max_chg_pct = _max_speed_change_per_step_pct;
       
-      #if SLD_VERBOSE >= 12
+      #if _MOTOR_VERBOSE >= 10
         Serial.print ( "max_chg_pct: " );
         Serial.println ( max_chg_pct );
       #endif
@@ -151,7 +161,7 @@ class Motor {
         }
       }
       
-      #if SLD_VERBOSE >= 12
+      #if _MOTOR_VERBOSE >= 10
         Serial.print ( "       |-=>  max_chg_pct: " );
         Serial.println ( max_chg_pct );
       #endif
@@ -160,7 +170,7 @@ class Motor {
         // decelerate to zero before changing _curr_cirection
         if ( fabs ( _curr_speed_pct ) < max_chg_pct ) {
           // can come to full stop
-          #if SLD_VERBOSE >= 10
+          #if _MOTOR_VERBOSE >= 12
             Serial.print ( "full stop\n" );
           #endif                           
           _curr_speed_pct = 0.0;
@@ -168,7 +178,7 @@ class Motor {
         } else {
           // cannot yet come to full stop
           _curr_speed_pct -= max_chg_pct;
-          #if SLD_VERBOSE >= 10
+          #if _MOTOR_VERBOSE >= 12
             Serial.print ( "stopping\n" );
           #endif
         }
@@ -184,7 +194,7 @@ class Motor {
           if ( _curr_speed_pct < 0.0 ) {
             _curr_speed_pct = 0.0;
           }
-          #if SLD_VERBOSE >= 10
+          #if _MOTOR_VERBOSE >= 10
             Serial.print ( "decel\n" );
           #endif
         } else {
@@ -197,7 +207,7 @@ class Motor {
           if ( _curr_speed_pct > 100.0 ) {
             _curr_speed_pct = 100.0;
           }
-          #if SLD_VERBOSE >= 10
+          #if _MOTOR_VERBOSE >= 10
             Serial.print ( "accel\n" );
           #endif
         }
@@ -216,7 +226,7 @@ class Motor {
       if (   ( _curr_direction == _cmd_direction ) 
           && ( _curr_speed_pct == _cmd_speed_pct ) ) {
         // changes are complete
-        #if SLD_VERBOSE > 5
+        #if _MOTOR_VERBOSE >= 12
           Serial.print ( _motor_ID );
           Serial.print ( " --> Done" );
           Serial.println ();
@@ -240,6 +250,7 @@ class Motor {
     int _cmd_direction;
     static const float _max_accel_per_sec_pct = 100.0 / 5.0;
     static const float _max_speed_change_per_step_pct = 0.5;
+    enum { _MOTOR_VERBOSE = 6 };
 };
 
 Motor left ( 100, pp_L_FWD, pp_L_REV ); 
@@ -257,12 +268,12 @@ void setup() {
   digitalWrite ( pd_MOTOR_ENABLE, 0 );
 
   #ifdef BAUDRATE
-    Serial.begin(BAUDRATE);
+    Serial.begin ( BAUDRATE );
     while ( millis() < 5000 && !Serial ) { };
     delay ( 2000 );
-    snprintf(strBuf, BUFLEN, "%s: UltraViolet slave hardware and software v%s (%s)\n", 
-      PROGMONIKER, VERSION, VERDATE);
-    Serial.print(strBuf);
+    snprintf ( strBuf, BUFLEN, "%s: UltraViolet slave hardware and software v%s (%s)\n", 
+      PROGMONIKER, VERSION, VERDATE );
+    Serial.println ( strBuf );
   #endif
 
   neoPixelStrip.begin();
@@ -272,11 +283,13 @@ void setup() {
   
 }
 
-void loop() {
+#define TICK_PERIOD_ms 50
 
-  static int state = 0;
-  static unsigned int state_started_at_ms = 0;
-  static unsigned long state_duration;
+void loop() {
+  
+  static unsigned int lastDisplayAt_ms = 0;
+
+  handleControl();
   
   if ( ( millis() - lastCmdAt_ms ) < COMMUNICATIONS_TIMEOUT_ms ) {
     setNeoPixelColor ( 0, GREEN );
@@ -286,13 +299,16 @@ void loop() {
     disable_movement ();
     setNeoPixelColor ( 0, RED );
   }
-  
-  tick ();
-  
-  showSpeed ( 5, left.speed () );
-  showSpeed ( 6, right.speed () );
+    
+  if ( ( millis() - lastDisplayAt_ms ) >= TICK_PERIOD_ms ) {
+    
+    tick ();
 
-  delay ( 50 );
+    showSpeed ( 5, left.speed () );
+    showSpeed ( 6, right.speed () );
+    lastDisplayAt_ms = millis();
+    
+  }
   
 }
 
@@ -354,57 +370,79 @@ void showSpeed ( int n, float speed ) {
     
 */
 
-void handleControl() {
-  const int inBufLen = 20;
-  static char inBuf[inBufLen];
-  static int inBufPtr = 0;
-  int i, len;
+const int inBufLen = 20;
+char inBuf [ inBufLen ];
+int inBufPtr = 0;
   
-  if ( len = Serial.available() ) {
-    for ( i = 0; i < len; i++ ) {
-      if ( inBufPtr >= inBufLen ) {
-        Serial.println ("BUFFER OVERRUN");
-        inBufPtr = 0;
-      }
-      inBuf [ inBufPtr ] = Serial.read();
-      if ( inBuf [ inBufPtr ] == 0xe3 ) {
-        // start character; clear buffer
-        inBufPtr = 0;
-      }
+void handleControl() {
+  
+  while ( Serial.available() ) {
+          
+    if ( inBufPtr >= inBufLen ) {
+      Serial.println ("BUFFER OVERRUN");
+      inBufPtr = 0;
+    }
+    
+    inBuf [ inBufPtr ] = Serial.read();
+    
+    if ( inBuf [ inBufPtr ] == 0x3e ) {
+      // received the start character; clear buffer
+      inBufPtr = 0;
+      setNeoPixelColor ( 1, BLUE );
+    } else {
+      inBufPtr++;
+      setNeoPixelColor ( 1, MAGENTA );
+    }
+    
+    // inBufPtr is the number of chars received; points to first unused char position
+    
+    if ( inBufPtr == 8 ) {
+      // have received enough characters to be a complete message
       
-      // LEDToggle();
-      // Serial.println(inBuf [ inBufPtr ], HEX);
+      int16_t stickLR, stickUD;
+      uint16_t bits, cksum, testCkSum;
       
-      if ( inBufPtr == 8 ) {
-        // got a full buffer
-        int16_t stickLR = inBuf [ 0 ] + ( inBuf [ 1 ] << 8 );
-        int16_t stickUD = inBuf [ 2 ] + ( inBuf [ 3 ] << 8 );
-        uint16_t bits = inBuf [ 4 ] + ( inBuf [ 5 ] << 8 );
-        int16_t cksum = inBuf [ 6 ] + ( inBuf [ 7 ] << 8 );
-        uint16_t testCkSum = stickLR ^ stickUD ^ bits;
-        
-        if ( testCkSum == cksum ) {
-          // good message received
-          lastCmdAt_ms = millis ();  // log time of arrival
-          handleCommand ( stickLR, stickUD, bits );
-        } else {
+      setNeoPixelColor ( 1, YELLOW );
+      
+      stickLR = inBuf [ 0 ] + ( inBuf [ 1 ] << 8 );
+      stickUD = inBuf [ 2 ] + ( inBuf [ 3 ] << 8 );
+      bits = inBuf [ 4 ] + ( inBuf [ 5 ] << 8 );
+      cksum = inBuf [ 6 ] + ( inBuf [ 7 ] << 8 );
+      testCkSum = stickLR ^ stickUD ^ bits;
+      
+      if ( testCkSum == cksum ) {
+        // good message received
+        lastCmdAt_ms = millis ();  // log time of arrival
+        setNeoPixelColor ( 1, GREEN );
+        if ( SLD_VERBOSE >= 8 ) {
+          Serial.print ( " msg OK at " ); Serial.println ( millis() );
+        }
+        handleCommand ( stickLR, stickUD, bits );
+      } else {
+        if ( SLD_VERBOSE >= 1 ) {
           Serial.print ( " Bad checksum: " );
           Serial.print ( "L: 0x" ); Serial.print ( stickLR, HEX ); 
           Serial.print ( "; R: 0x" ); Serial.print ( stickUD, HEX ); 
           Serial.print ( "; bits: 0x" ); Serial.print ( bits, HEX ); 
-          Serial.print ( "; provided cksum: 0x" ); Serial.print ( cksum, HEX ); 
-          Serial.print ( "; calculated cksum: 0x" ); Serial.print ( testCkSum, HEX );
+          Serial.print ( "; his cksum: 0x" ); Serial.print ( cksum, HEX ); 
+          Serial.print ( "; my cksum: 0x" ); Serial.print ( testCkSum, HEX );
           Serial.println ();
         }
-        // whether or not msg was good, clear the buffer for next message
-        inBufPtr = 0;
-      } else if ( inBuf [ inBufPtr ] == 0x0a || inBuf [ inBufPtr ] == 0x0d ) {
-        // ignore CR and LF
-      } else {
-        inBufPtr++;
+        setNeoPixelColor ( 1, CYAN );
       }
-    }  // reading the input buffer
+      // whether or not msg was good, clear the buffer for next message
+      inBufPtr = 0;
+    }
+  }  // reading the input buffer
+  
+  if ( SLD_VERBOSE >= 10 ) {
+    for ( int i = 0; i < inBufPtr; i++ ) {
+      Serial.print ( inBuf [ inBufPtr ], HEX );
+    }
+    Serial.println ();
+  
   }  // Serial.available
+  
 }
 
 // handleCommand updates wheel speed and platform commands
@@ -415,11 +453,17 @@ void handleCommand ( int16_t stickLR, int16_t stickUD, uint16_t bits ) {
   //   L motor speed command is that projected onto vector (  1, 1 )
   //   R                                                   ( -1, 1 )
   
+  // begin by imposing dead band; if the stick is within STICK_DEADBAND_cts
+  // counts of center, call it centered -- forestalls slow drift
+  
+  if ( abs ( stickLR - 512 ) < STICK_DEADBAND_cts ) stickLR = 512;
+  if ( abs ( stickUD - 512 ) < STICK_DEADBAND_cts ) stickUD = 512;
+  
   float sX, sY, cR, cL;
   sX = float ( stickLR ) / 512.0 - 1.0;  // stick x, scaled -1 to 1
   sY = float ( stickUD ) / 512.0 - 1.0;
   
-  #if SLD_VERBOSE > 5
+  #if SLD_VERBOSE >= 8
     Serial.print ( "hC: stickLR: " ); Serial.print ( stickLR );
     Serial.print ( "; stickUD: " ); Serial.print ( stickUD );
     Serial.print ( "; sX: " ); Serial.print ( sX );
@@ -428,13 +472,14 @@ void handleCommand ( int16_t stickLR, int16_t stickUD, uint16_t bits ) {
   
   // reduce turning input at higher speeds
   sX *= ( 1.0 - fabs ( sY ) );
-  #if SLD_VERBOSE > 5
+  #if SLD_VERBOSE >= 4
     Serial.print ( "   sX reduced to: " ); Serial.print ( sX );
     Serial.println ();
   #endif
   
-  cL = ( sX + sY ) / 1.414;
-  cR = ( -sX + sY ) / 1.414;
+  // cL and cR are the commanded speeds (in percent) for L and R motors
+  cL = ( sX + sY ) * 100.0 / 1.414;
+  cR = ( -sX + sY )* 100.0 / 1.414;
   
   if ( cL >= 0 ) {
     left.speed ( cL, DIR_FWD );
@@ -448,9 +493,9 @@ void handleCommand ( int16_t stickLR, int16_t stickUD, uint16_t bits ) {
     right.speed ( -cR, DIR_REV );
   }
   
-  #if SLD_VERBOSE > 5
-    Serial.print ( "  command L: " ); Serial.print ( cL );
-    Serial.print ( "  command R: " ); Serial.print ( cR );
+  #if SLD_VERBOSE >= 6
+    Serial.print ( "  cmd L: " ); Serial.print ( cL );
+    Serial.print ( "  cmd R: " ); Serial.print ( cR );
     Serial.println ();
   #endif
     
