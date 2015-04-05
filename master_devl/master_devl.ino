@@ -67,11 +67,12 @@ void loop () {
   static int oldJoystickLR = 0, oldJoystickUD = 0;
   static unsigned int oldBits = 0;
   
-  int joystickLR, joystickUD;
+  int16_t joystickLR, joystickUD;
   uint16_t bits, checksum;
   
   // update the state vectors
   
+  // the joysticks are read and sent RAW 0-1024 to the robot
   joystickLR = analogRead ( paJoystickLR );
   joystickUD = analogRead ( paJoystickUD );
   bits = 0 
@@ -96,22 +97,40 @@ void loop () {
     
     strBuf [ 0 ] = '>';
     strBuf [ 1 ] = '>';
-    strBuf [ 2 ] = ( joystickLR >> 0 ) & 0x00ff;
-    strBuf [ 3 ] = ( joystickLR >> 8 ) & 0x00ff;
-    strBuf [ 4 ] = ( joystickUD >> 0 ) & 0x00ff;
-    strBuf [ 5 ] = ( joystickUD >> 8 ) & 0x00ff;
-    strBuf [ 6 ] = ( bits       >> 0 ) & 0x00ff;
-    strBuf [ 7 ] = ( bits       >> 8 ) & 0x00ff;
-    strBuf [ 8 ] = ( checksum   >> 0 ) & 0x00ff;
-    strBuf [ 9 ] = ( checksum   >> 8 ) & 0x00ff;
+    // strBuf [ 2 ] = ( joystickLR >> 0 ) & 0x00ff;
+    // strBuf [ 3 ] = ( joystickLR >> 8 ) & 0x00ff;
+    memcpy ( & strBuf [ 2 ], ( void * ) &joystickLR, 2 );
+    // strBuf [ 4 ] = ( joystickUD >> 0 ) & 0x00ff;
+    // strBuf [ 5 ] = ( joystickUD >> 8 ) & 0x00ff;
+    memcpy ( & strBuf [ 4 ], ( void * ) &joystickUD, 2 );
+    // strBuf [ 6 ] = ( bits       >> 0 ) & 0x00ff;
+    // strBuf [ 7 ] = ( bits       >> 8 ) & 0x00ff;
+    memcpy ( & strBuf [ 6 ], ( void * ) &bits, 2 );
+    // strBuf [ 8 ] = ( checksum   >> 0 ) & 0x00ff;
+    // strBuf [ 9 ] = ( checksum   >> 8 ) & 0x00ff;
+    memcpy ( & strBuf [ 8 ], ( void * ) &checksum, 2 );
     
-    if ( 1 ) {
+    Serial.write ( ( uint8_t * ) strBuf, 10 );
+    
+    
+    if ( 0 ) {
       Serial.println();
       Serial.print ( "LR: " ); Serial.print ( joystickLR );
       Serial.print ( "UD: " ); Serial.print ( joystickUD );
       Serial.print ( "bits: " ); Serial.print ( bits );
+      Serial.println ();
+    } else if ( 1 ) {
+      Serial.print ( " FUVM: " );
+      Serial.print ( "LR: 0x" ); Serial.print ( joystickLR, HEX ); 
+      Serial.print ( "; UD: 0x" ); Serial.print ( joystickUD, HEX ); 
+      Serial.print ( "; bits: 0x" ); Serial.print ( bits, HEX ); 
+      Serial.print ( "; cksum: 0x" ); Serial.print ( checksum, HEX );
+      Serial.println ();
     }
-    Serial.write ( ( uint8_t * ) strBuf, 10 );
+
+    
+    
+    
     
     lastMessageAt_ms = millis();
     

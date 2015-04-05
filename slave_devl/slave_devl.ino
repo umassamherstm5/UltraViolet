@@ -24,7 +24,7 @@
 #include <Adafruit_NeoPixel.h>
 
 #define BAUDRATE 19200
-#define SLD_VERBOSE 8
+#define SLD_VERBOSE 6
 #define COMMUNICATIONS_TIMEOUT_ms 2000
 #define STICK_DEADBAND_cts 10
 
@@ -85,6 +85,9 @@ Adafruit_NeoPixel neoPixelStrip = Adafruit_NeoPixel(nPixels, pd_NeoPixel_Control
 // on a live circuit...if you must, connect GND first.
 
 class Motor {
+  
+  #define _MOTOR_VERBOSE 2
+  
   public:
   
     Motor () {
@@ -244,13 +247,12 @@ class Motor {
     int _pp_REV;
     int _pd_ENABLE;
     float _curr_speed_pct;
-    unsigned char _curr_direction;
+    int _curr_direction;
     unsigned long _last_change_at;
     float _cmd_speed_pct;
     int _cmd_direction;
     static const float _max_accel_per_sec_pct = 100.0 / 5.0;
     static const float _max_speed_change_per_step_pct = 0.5;
-    enum { _MOTOR_VERBOSE = 6 };
 };
 
 Motor left ( 100, pp_L_FWD, pp_L_REV ); 
@@ -376,77 +378,120 @@ int inBufPtr = 0;
   
 void handleControl() {
   
+  /*
+    states indicated by color of neopixel 1
+      waitingForStartCharacter YELLOW
+      receivingMessage         BLUE
+      received 8 byte message  MAGENTA
+      good message received    GREEN
+      bad checksum             CYAN
+  */
+  
+  enum { waitingForStartCharacter,
+         waitingForSecondStartCharacter,
+         receivingMessage
+       };
+  #define charStart 0x3e
+       
+  static int hcState = waitingForStartCharacter;
+  
   while ( Serial.available() ) {
           
     if ( inBufPtr >= inBufLen ) {
       Serial.println ("BUFFER OVERRUN");
+      hcState = waitingForStartCharacter;
       inBufPtr = 0;
     }
     
-    inBuf [ inBufPtr ] = Serial.read();
+    char theNewChar = Serial.read();
     
-    if ( inBuf [ inBufPtr ] == 0x3e ) {
-      // received the start character; clear buffer
-      inBufPtr = 0;
-      setNeoPixelColor ( 1, BLUE );
-    } else {
-      inBufPtr++;
-      setNeoPixelColor ( 1, MAGENTA );
-    }
-    
-    // inBufPtr is the number of chars received; points to first unused char position
-    
-    if ( inBufPtr == 8 ) {
-      // have received enough characters to be a complete message
-      
-      int16_t stickLR, stickUD;
-      uint16_t bits, cksum, testCkSum;
-      
-      setNeoPixelColor ( 1, YELLOW );
-      
-      stickLR = inBuf [ 0 ] + ( inBuf [ 1 ] << 8 );
-      stickUD = inBuf [ 2 ] + ( inBuf [ 3 ] << 8 );
-      bits = inBuf [ 4 ] + ( inBuf [ 5 ] << 8 );
-      cksum = inBuf [ 6 ] + ( inBuf [ 7 ] << 8 );
-      testCkSum = stickLR ^ stickUD ^ bits;
-      
-      if ( testCkSum == cksum ) {
-        // good message received
-        lastCmdAt_ms = millis ();  // log time of arrival
-        setNeoPixelColor ( 1, GREEN );
-        if ( SLD_VERBOSE >= 8 ) {
-          Serial.print ( " msg OK at " ); Serial.println ( millis() );
+    switch ( hcState ) {
+      case waitingForStartCharacter:
+        setNeoPixelColor ( 1, YELLOW );
+        if ( theNewChar == charStart ) {
+          // got a start char
+          hcState = waitingForSecondStartCharacter;
+        } else {
+          // got a character other than the start char; ignore it
+          inBufPtr = 0;
         }
-        handleCommand ( stickLR, stickUD, bits );
-      } else {
-        if ( SLD_VERBOSE >= 1 ) {
-          Serial.print ( " Bad checksum: " );
-          Serial.print ( "L: 0x" ); Serial.print ( stickLR, HEX ); 
-          Serial.print ( "; R: 0x" ); Serial.print ( stickUD, HEX ); 
-          Serial.print ( "; bits: 0x" ); Serial.print ( bits, HEX ); 
-          Serial.print ( "; his cksum: 0x" ); Serial.print ( cksum, HEX ); 
-          Serial.print ( "; my cksum: 0x" ); Serial.print ( testCkSum, HEX );
-          Serial.println ();
+        break;
+    
+      case waitingForSecondStartCharacter:
+        if ( theNewChar == charStart ) {
+          // got the second start char
+          hcState = receivingMessage;
+          setNeoPixelColor ( 1, BLUE );
+        } else {
+          // character not start char; start over
+          hcState = waitingForStartCharacter;
+          inBufPtr = 0;
         }
-        setNeoPixelColor ( 1, CYAN );
-      }
-      // whether or not msg was good, clear the buffer for next message
-      inBufPtr = 0;
-    }
-  }  // reading the input buffer
-  
-  if ( SLD_VERBOSE >= 10 ) {
-    for ( int i = 0; i < inBufPtr; i++ ) {
-      Serial.print ( inBuf [ inBufPtr ], HEX );
-    }
-    Serial.println ();
-  
+        break;
+    
+      case receivingMessage:
+        inBuf [ inBufPtr++ ] = theNewChar;
+        // inBufPtr is the number of chars received; points to first unused char position
+    
+        if ( inBufPtr == 8 ) {
+          // have received enough characters to be a complete message
+          
+          int16_t stickLR, stickUD;
+          uint16_t bits, cksum, testCkSum;
+          
+          setNeoPixelColor ( 1, MAGENTA );
+          
+          // stickLR = inBuf [ 0 ] | ( inBuf [ 1 ] << 8 );
+          memcpy ( &stickLR, ( void * ) & inBuf [ 0 ], 2 );
+          // stickUD = inBuf [ 2 ] | ( inBuf [ 3 ] << 8 );
+          memcpy ( &stickUD, ( void * ) & inBuf [ 2 ], 2 );
+          // bits = inBuf [ 4 ] | ( inBuf [ 5 ] << 8 );
+          memcpy ( &bits,    ( void * ) & inBuf [ 4 ], 2 );
+          // cksum = inBuf [ 6 ] | ( inBuf [ 7 ] << 8 );
+          memcpy ( &cksum,   ( void * ) & inBuf [ 6 ], 2 );
+          testCkSum = stickLR ^ stickUD ^ bits;
+          
+          if ( testCkSum == cksum ) {
+            // good message received
+            lastCmdAt_ms = millis ();  // log time of arrival
+            setNeoPixelColor ( 1, GREEN );
+            if ( SLD_VERBOSE >= 8 ) {
+              Serial.print ( " msg OK at " ); Serial.println ( millis() );
+            }
+            handleCommand ( stickLR, stickUD, bits );
+          } else {
+            if ( SLD_VERBOSE >= 1 ) {
+              Serial.print ( " Bad checksum: " );
+              Serial.print ( "LR: 0x" ); Serial.print ( stickLR, HEX ); 
+              Serial.print ( "; UD: 0x" ); Serial.print ( stickUD, HEX ); 
+              Serial.print ( "; bits: 0x" ); Serial.print ( bits, HEX ); 
+              Serial.print ( "; his cksum: 0x" ); Serial.print ( cksum, HEX ); 
+              Serial.print ( "; my cksum: 0x" ); Serial.print ( testCkSum, HEX );
+              Serial.println ();
+            }
+            setNeoPixelColor ( 1, CYAN );
+          }
+          // whether or not msg was good, clear the buffer for next message
+          hcState = waitingForStartCharacter;
+          inBufPtr = 0;
+        }
+      }  // reading the input buffer
+    
+      if ( SLD_VERBOSE >= 10 ) {
+        for ( int i = 0; i < inBufPtr; i++ ) {
+          Serial.print ( inBuf [ inBufPtr ], HEX );
+        }
+        Serial.println ();
+        break;
+    }  // switch statement
   }  // Serial.available
-  
 }
 
 // handleCommand updates wheel speed and platform commands
 void handleCommand ( int16_t stickLR, int16_t stickUD, uint16_t bits ) {
+  
+  // stick positions come in as RAW [0, 1023] values
+  // so centered sticks would be ( 512, 512 ).
   
   // translate stick position into speed commands
   // if stick position is ( x, y )
@@ -460,10 +505,11 @@ void handleCommand ( int16_t stickLR, int16_t stickUD, uint16_t bits ) {
   if ( abs ( stickUD - 512 ) < STICK_DEADBAND_cts ) stickUD = 512;
   
   float sX, sY, cR, cL;
-  sX = float ( stickLR ) / 512.0 - 1.0;  // stick x, scaled -1 to 1
-  sY = float ( stickUD ) / 512.0 - 1.0;
+  // scale the sticks to [-1.0, 1.0]
+  sX = ( float ( stickLR ) - 512.0 ) / 512.0;  // stick x
+  sY = ( float ( stickUD ) - 512.0 ) / 512.0;
   
-  #if SLD_VERBOSE >= 8
+  #if SLD_VERBOSE >= 10
     Serial.print ( "hC: stickLR: " ); Serial.print ( stickLR );
     Serial.print ( "; stickUD: " ); Serial.print ( stickUD );
     Serial.print ( "; sX: " ); Serial.print ( sX );
@@ -478,19 +524,19 @@ void handleCommand ( int16_t stickLR, int16_t stickUD, uint16_t bits ) {
   #endif
   
   // cL and cR are the commanded speeds (in percent) for L and R motors
-  cL = ( sX + sY ) * 100.0 / 1.414;
-  cR = ( -sX + sY )* 100.0 / 1.414;
+  cL = (  sX + sY ) * 100.0 / 1.414;
+  cR = ( -sX + sY ) * 100.0 / 1.414;
   
   if ( cL >= 0 ) {
-    left.speed ( cL, DIR_FWD );
+    left.speed ( abs ( cL ), DIR_FWD );
   } else {
-    left.speed ( -cL, DIR_REV );
+    left.speed ( abs ( cL ), DIR_REV );
   }
   
   if ( cR > 0 ) {
-    right.speed ( cR, DIR_FWD );
+    right.speed ( abs ( cR ), DIR_FWD );
   } else {
-    right.speed ( -cR, DIR_REV );
+    right.speed ( abs ( cR ), DIR_REV );
   }
   
   #if SLD_VERBOSE >= 6
